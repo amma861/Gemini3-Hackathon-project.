@@ -1,0 +1,8 @@
+{
+  "name": "Aura-Align: Global Health Guard",
+  "description": "A high-stakes medical translation and crisis response engine integrating Gemini 3 for accurate English-to-Swahili translations with Jaccard-based linguistic auditing and panic de-escalation.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
