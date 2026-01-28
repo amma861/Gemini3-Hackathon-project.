@@ -12,19 +12,34 @@ export interface MedicalTokens {
   missedEntities: string[];
 }
 
+export interface CulturalAnalysis {
+  regionalNuances: string[];
+  potentialMisunderstandings: string[];
+  tabooConsiderations: string[];
+  recommendedPhasing: string;
+}
+
 export interface TranslationResult {
-  igboTranslation: string; // Used for the target language (Swahili in current node)
+  translatedText: string; 
   backTranslation: string;
   summary: string[];
   culturalNotes: string;
+  culturalAnalysis: CulturalAnalysis;
   jaccardScore: number;
   criticalRisk: boolean;
   panic: PanicAnalysis;
   tokens: MedicalTokens;
 }
 
+export interface WordDefinition {
+  definition: string;
+  culturalConnotation: string;
+  crisisSignificance: string;
+  regionalAlignment: string;
+}
+
 export interface TranscriptionTurn {
-  role: 'user' | 'model';
+  role: 'user' | 'model' | 'system';
   text: string;
   timestamp: number;
 }
@@ -34,6 +49,7 @@ export interface AnalysisState {
   data?: TranslationResult;
   error?: string;
   step?: string;
+  isTransient?: boolean;
   transcriptions?: TranscriptionTurn[];
 }
 

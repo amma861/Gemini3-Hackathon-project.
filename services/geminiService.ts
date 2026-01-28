@@ -1,180 +1,234 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
-import { TranslationResult, PanicAnalysis, FeedbackEntry } from "../types";
+import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { TranslationResult, WordDefinition, FeedbackEntry } from "../types";
 
-const MODEL_NAME = 'gemini-3-pro-preview';
-const FAST_MODEL = 'gemini-3-flash-preview';
+const PRO_MODEL = 'gemini-3-pro-preview';
+const FLASH_MODEL = 'gemini-3-flash-preview';
+const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
 
 export class GeminiService {
-  constructor() {}
+  private ai: GoogleGenAI;
 
-  private getAI() {
-    return new GoogleGenAI({ apiKey: process.env.API_KEY });
+  constructor() {
+    this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  }
+
+  private async withRetry<T>(
+    operation: () => Promise<T>,
+    maxRetries: number = 3,
+    initialDelay: number = 1000
+  ): Promise<T> {
+    let lastError: any;
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        return await operation();
+      } catch (err: any) {
+        lastError = err;
+        const status = err.status || (err.message?.includes('429') ? 429 : 500);
+        
+        // Retry logic for transient errors (429, 500, 503, 504)
+        if (status === 429 || status >= 500) {
+          const delay = initialDelay * Math.pow(2, i);
+          console.warn(`Transient node disruption (${status}). Retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastError;
+  }
+
+  decode(base64: string) {
+    const binaryString = atob(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  encode(bytes: Uint8Array) {
+    let binary = '';
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
+  async decodeAudioData(
+    data: Uint8Array,
+    ctx: AudioContext,
+    sampleRate: number,
+    numChannels: number,
+  ): Promise<AudioBuffer> {
+    const dataInt16 = new Int16Array(data.buffer);
+    const frameCount = dataInt16.length / numChannels;
+    const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+    for (let channel = 0; channel < numChannels; channel++) {
+      const channelData = buffer.getChannelData(channel);
+      for (let i = 0; i < frameCount; i++) {
+        channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+      }
+    }
+    return buffer;
   }
 
   private getLearnedContext(): string {
     try {
       const feedback: FeedbackEntry[] = JSON.parse(localStorage.getItem('aura_align_feedback') || '[]');
       if (feedback.length === 0) return "";
-
-      // Prioritize negative feedback for correction and positive for standard setting
       const negative = feedback.filter(f => f.rating === 'negative').slice(-5);
       const positive = feedback.filter(f => f.rating === 'positive').slice(-5);
-
-      let context = "\n### CRITICAL: LEARNED KNOWLEDGE BASE (USER FEEDBACK ALIGNMENT)\n";
-      context += "You must align your translation logic with the following human-verified feedback:\n";
-
+      let context = "\n### LEARNED KNOWLEDGE BASE\n";
       if (negative.length > 0) {
-        context += "\n[CORRECTIONS REQUIRED - PREVIOUS DRIFT DETECTED]:\n";
-        negative.forEach(f => {
-          context += `- Source: "${f.sourceText}"\n  Previous Error: "${f.translatedText}"\n  Action: Improve medical accuracy and cultural alignment for this type of input.\n`;
-        });
+        context += "AVOID ERRORS:\n" + negative.map(f => `- "${f.sourceText}" -> X "${f.translatedText}"`).join('\n') + "\n";
       }
-
       if (positive.length > 0) {
-        context += "\n[VERIFIED STANDARDS - MAINTAIN THIS QUALITY]:\n";
-        positive.forEach(f => {
-          context += `- Source: "${f.sourceText}"\n  Correct Output: "${f.translatedText}"\n`;
-        });
+        context += "VALIDATED EXAMPLES:\n" + positive.map(f => `- "${f.sourceText}" -> OK "${f.translatedText}"`).join('\n') + "\n";
       }
-
       return context;
-    } catch (e) {
-      console.error("Error reading feedback context", e);
-      return "";
-    }
+    } catch (e) { return ""; }
   }
 
   async processMedicalDocument(
     textInput: string,
-    targetLanguage: string = "Igbo",
+    targetLanguage: string,
     imageInput?: string
   ): Promise<TranslationResult> {
-    const ai = this.getAI();
-    const learnedContext = this.getLearnedContext();
-
-    const prompt = `
-      Perform a high-stakes medical analysis and translation for the Aura-Align Global South Node.
+    try {
+      const learnedContext = this.getLearnedContext();
       
-      TARGET LANGUAGE: ${targetLanguage}
-      ${learnedContext}
-      
-      STEP 1: PANIC NOTICE
-      Analyze the emotional state. Provide a panic score (0-100), key indicators, and de-escalation protocol.
-      
-      STEP 2: MULTIMODAL MEDICAL ENTITY EXTRACTION
-      Identify every critical medical entity: Medications, Dosages, Conditions, Vital Signs, and Procedures.
-      
-      STEP 3: UNIVERSAL TRANSLATION LOOP (Phase 1: Translation)
-      Translate the source into high-fidelity medical ${targetLanguage}. 
-      Ensure cultural alignment and accessibility. Refer to the LEARNED KNOWLEDGE BASE above for stylistic and accuracy alignment.
-      
-      STEP 4: UNIVERSAL TRANSLATION LOOP (Phase 2: Back-Translation Audit)
-      Translate your ${targetLanguage} output back to English.
-      Extract medical entities from this back-translation.
-      
-      STEP 5: SUMMARY & CULTURAL GUARD
-      Provide a 3-bullet patient summary and cultural context notes.
-      
-      SOURCE:
-      ${textInput}
-    `;
-
-    const parts: any[] = [{ text: prompt }];
-    if (imageInput) {
-      parts.push({
-        inlineData: {
-          data: imageInput.split(',')[1],
-          mimeType: 'image/jpeg'
-        }
-      });
-    }
-
-    const response = await ai.models.generateContent({
-      model: MODEL_NAME,
-      contents: { parts },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            panic: {
+      const responseText = await this.withRetry(async () => {
+        const response = await this.ai.models.generateContent({
+          model: PRO_MODEL,
+          contents: {
+            parts: [
+              { text: `Translate to ${targetLanguage}. 
+                ### CLINICAL PROTOCOL
+                1. ACCURACY: Precision is paramount. Use clinical terminology that is regionally appropriate for ${targetLanguage}.
+                2. CULTURAL ALIGNMENT: Identify medical concepts that may be misunderstood (e.g., organ donation, blood transfusions, psychiatric care) in ${targetLanguage} contexts. Provide specific regional nuances.
+                3. TABOOS: Note terms or conditions that are taboo in ${targetLanguage} cultures and suggest respectful phrasing.
+                4. AUDIT: Identify critical medical entities in both source and translation.
+                5. JACCARD: Provide a similarity score for entity preservation.
+                ${learnedContext}
+                SOURCE: ${textInput}` },
+              ...(imageInput ? [{ inlineData: { data: imageInput.split(',')[1], mimeType: 'image/jpeg' } }] : [])
+            ]
+          },
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
               type: Type.OBJECT,
               properties: {
-                score: { type: Type.NUMBER },
-                indicators: { type: Type.ARRAY, items: { type: Type.STRING } },
-                deEscalationSteps: { type: Type.ARRAY, items: { type: Type.STRING } }
+                translatedText: { type: Type.STRING },
+                backTranslation: { type: Type.STRING },
+                summary: { type: Type.ARRAY, items: { type: Type.STRING } },
+                culturalNotes: { type: Type.STRING },
+                culturalAnalysis: {
+                  type: Type.OBJECT,
+                  properties: {
+                    regionalNuances: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    potentialMisunderstandings: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    tabooConsiderations: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    recommendedPhasing: { type: Type.STRING }
+                  },
+                  required: ["regionalNuances", "potentialMisunderstandings", "tabooConsiderations", "recommendedPhasing"]
+                },
+                jaccardScore: { type: Type.NUMBER },
+                criticalRisk: { type: Type.BOOLEAN },
+                panic: {
+                  type: Type.OBJECT,
+                  properties: {
+                    score: { type: Type.NUMBER },
+                    indicators: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    deEscalationSteps: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ["score", "indicators", "deEscalationSteps"]
+                },
+                tokens: {
+                  type: Type.OBJECT,
+                  properties: {
+                    originalEntities: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    backTranslatedEntities: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    matchedEntities: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    missedEntities: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ["originalEntities", "backTranslatedEntities", "matchedEntities", "missedEntities"]
+                }
               },
-              required: ["score", "indicators", "deEscalationSteps"]
-            },
-            originalMedicalEntities: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING }
-            },
-            backTranslatedMedicalEntities: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING }
-            },
-            translation: { type: Type.STRING },
-            backTranslation: { type: Type.STRING },
-            summary: { type: Type.ARRAY, items: { type: Type.STRING } },
-            culturalNotes: { type: Type.STRING }
-          },
-          required: ["panic", "originalMedicalEntities", "backTranslatedMedicalEntities", "translation", "backTranslation", "summary", "culturalNotes"]
-        }
-      }
-    });
+              required: ["translatedText", "backTranslation", "summary", "culturalNotes", "culturalAnalysis", "jaccardScore", "criticalRisk", "panic", "tokens"]
+            }
+          }
+        });
+        return response.text;
+      });
 
-    const result = JSON.parse(response.text.trim()) as any;
-    
-    const originalSet = new Set((result.originalMedicalEntities as string[]).map((s: string) => s.toLowerCase().trim()));
-    const backSet = new Set((result.backTranslatedMedicalEntities as string[]).map((s: string) => s.toLowerCase().trim()));
-    const matched = [...originalSet].filter(x => backSet.has(x));
-    const missed = [...originalSet].filter(x => !backSet.has(x));
-    const union = new Set([...originalSet, ...backSet]);
-    const jaccardScore = union.size === 0 ? 1 : matched.length / union.size;
+      return JSON.parse(responseText);
+    } catch (err: any) {
+      const status = err.status;
+      const message = err.message?.toLowerCase() || '';
 
-    return {
-      igboTranslation: result.translation,
-      backTranslation: result.backTranslation,
-      summary: result.summary,
-      culturalNotes: result.culturalNotes,
-      jaccardScore,
-      criticalRisk: jaccardScore < 0.7,
-      panic: result.panic,
-      tokens: {
-        originalEntities: result.originalMedicalEntities as string[],
-        backTranslatedEntities: result.backTranslatedMedicalEntities as string[],
-        matchedEntities: matched,
-        missedEntities: missed
+      if (message.includes('safety')) {
+        const safetyError = new Error("Clinical safety protocol violation. Content contains restricted medical patterns.");
+        (safetyError as any).isTransient = false;
+        throw safetyError;
       }
-    };
+
+      if (status === 429) {
+        const rateError = new Error("Linguistic node saturated. Rate limit protocol active for current project.");
+        (rateError as any).isTransient = true;
+        throw rateError;
+      }
+
+      if (status >= 500 || message.includes('fetch')) {
+        const netError = new Error("Neural node disconnected. Network or server disruption detected.");
+        (netError as any).isTransient = true;
+        throw netError;
+      }
+
+      const defaultError = new Error("Unknown protocol disruption. Synthesis aborted unexpectedly after multiple retries.");
+      (defaultError as any).isTransient = true;
+      throw defaultError;
+    }
   }
 
-  async getWordDefinition(word: string, context: string, sourceLang: string) {
-    const ai = this.getAI();
-    const prompt = `
-      Provide a medical definition for the word "${word}" within the context of this medical text: "${context}".
-      The word is currently in ${sourceLang}.
-      
-      Format the response in JSON:
-      {
-        "definition": "Simple medical explanation",
-        "crisisSignificance": "Why this word matters in an emergency",
-        "globalTranslations": {
-          "Spanish": "translation",
-          "French": "translation",
-          "Arabic": "translation"
+  async getWordDefinition(word: string, context: string, language: string): Promise<WordDefinition> {
+    return this.withRetry(async () => {
+      const response = await this.ai.models.generateContent({
+        model: FLASH_MODEL,
+        contents: `Clinical and regional analysis of "${word}" in context of: "${context}". Target linguistic node: ${language}.`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              definition: { type: Type.STRING },
+              culturalConnotation: { type: Type.STRING },
+              crisisSignificance: { type: Type.STRING },
+              regionalAlignment: { type: Type.STRING }
+            },
+            required: ["definition", "culturalConnotation", "crisisSignificance", "regionalAlignment"]
+          }
         }
-      }
-    `;
-
-    const response = await ai.models.generateContent({
-      model: FAST_MODEL,
-      contents: prompt,
-      config: { responseMimeType: "application/json" }
+      });
+      return JSON.parse(response.text);
     });
+  }
 
-    return JSON.parse(response.text.trim());
+  async generateSpeech(text: string, voiceName: string = 'Kore'): Promise<string> {
+    return this.withRetry(async () => {
+      const response = await this.ai.models.generateContent({
+        model: TTS_MODEL,
+        contents: [{ parts: [{ text: `Speak calmly as a first responder: ${text.substring(0, 1000)}` }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } }
+        }
+      });
+      return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || "";
+    });
   }
 }

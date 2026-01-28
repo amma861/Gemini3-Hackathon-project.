@@ -1,7 +1,7 @@
 
-import React, { useState } from 'react';
-import { ThumbsUp, ThumbsDown, CheckCircle, Database, ShieldCheck } from 'lucide-react';
-import { FeedbackEntry, TranslationResult } from '../types';
+import React, { useState, useEffect } from 'react';
+import { ThumbsUp, ThumbsDown, Database, ShieldCheck, Trash2, RefreshCw } from 'lucide-react';
+import { FeedbackEntry } from '../types';
 
 interface Props {
   sourceText: string;
@@ -13,6 +13,12 @@ interface Props {
 const TranslationFeedback: React.FC<Props> = ({ sourceText, translation, language, auditScore }) => {
   const [submitted, setSubmitted] = useState(false);
   const [hoverRating, setHoverRating] = useState<'positive' | 'negative' | null>(null);
+  const [trainingCount, setTrainingCount] = useState(0);
+
+  useEffect(() => {
+    const existing = JSON.parse(localStorage.getItem('aura_align_feedback') || '[]');
+    setTrainingCount(existing.length);
+  }, [submitted]);
 
   const handleFeedback = (rating: 'positive' | 'negative') => {
     const newEntry: FeedbackEntry = {
@@ -25,28 +31,38 @@ const TranslationFeedback: React.FC<Props> = ({ sourceText, translation, languag
       timestamp: Date.now()
     };
 
-    // Store in localStorage
     const existingFeedback = JSON.parse(localStorage.getItem('aura_align_feedback') || '[]');
     localStorage.setItem('aura_align_feedback', JSON.stringify([...existingFeedback, newEntry]));
 
     setSubmitted(true);
   };
 
+  const clearTraining = () => {
+    if (confirm("Reset local adaptive training? This will clear all previous medical corrections for this node.")) {
+      localStorage.removeItem('aura_align_feedback');
+      setTrainingCount(0);
+      setSubmitted(false);
+    }
+  };
+
   if (submitted) {
     return (
-      <div className="glass-effect p-6 rounded-3xl border border-blue-100 bg-blue-50/30 flex items-center justify-between animate-in fade-in zoom-in duration-500">
+      <div className="glass-effect p-8 rounded-[2.5rem] border border-blue-100 bg-blue-50/30 flex items-center justify-between animate-in fade-in zoom-in duration-500">
         <div className="flex items-center gap-4">
           <div className="p-3 bg-blue-600 text-white rounded-2xl shadow-lg shadow-blue-200">
-            <ShieldCheck size={20} />
+            <ShieldCheck size={24} />
           </div>
           <div>
-            <h4 className="font-black text-slate-900 uppercase tracking-tighter text-sm">Feedback Logged</h4>
-            <p className="text-xs text-slate-500 font-medium italic">Accuracy data stored for node optimization.</p>
+            <h4 className="font-black text-slate-900 uppercase tracking-tighter text-sm">Node Aligned</h4>
+            <p className="text-xs text-slate-500 font-medium italic">Your verification has been added to the knowledge base.</p>
           </div>
         </div>
-        <div className="px-4 py-1.5 bg-white border border-blue-200 rounded-full text-[10px] font-black text-blue-600 uppercase tracking-widest">
-          Audit Verified
-        </div>
+        <button 
+          onClick={() => setSubmitted(false)}
+          className="px-4 py-2 text-[10px] font-black text-blue-600 uppercase tracking-widest hover:underline"
+        >
+          Submit Another
+        </button>
       </div>
     );
   }
@@ -63,10 +79,18 @@ const TranslationFeedback: React.FC<Props> = ({ sourceText, translation, languag
             <p className="text-[10px] text-blue-400 font-black uppercase tracking-widest">Global Node Accuracy Check</p>
           </div>
         </div>
+        {trainingCount > 0 && (
+          <button 
+            onClick={clearTraining}
+            className="flex items-center gap-1.5 px-3 py-1 bg-red-50 text-red-600 rounded-full text-[9px] font-black uppercase tracking-widest border border-red-100 hover:bg-red-100 transition-colors"
+          >
+            <Trash2 size={10} /> Clear Training ({trainingCount})
+          </button>
+        )}
       </div>
 
       <div className="bg-blue-50/50 rounded-2xl p-6 border border-blue-100 mb-6">
-        <p className="text-sm text-slate-600 font-medium mb-4 italic text-center">
+        <p className="text-sm text-slate-600 font-medium mb-4 italic text-center px-4">
           "As a medical responder, was this translation medically accurate and culturally aligned for the {language} node?"
         </p>
         
@@ -98,7 +122,7 @@ const TranslationFeedback: React.FC<Props> = ({ sourceText, translation, languag
       </div>
 
       <div className="flex items-center gap-2 text-[9px] font-black text-blue-300 uppercase tracking-widest text-center justify-center">
-        <Database size={10} /> Data used for future local model alignment
+        <RefreshCw size={10} className="animate-spin-slow" /> Adaptive node synchronization active
       </div>
     </div>
   );
